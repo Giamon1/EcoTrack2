@@ -390,7 +390,7 @@ kiosk.add(kp);
 add(new THREE.BoxGeometry(1, 1.3, .08), dk, 0, 0, 0, kp);
 
 // ---- Real QR code: opens the site, "#scan" starts the session after login ----
-const QR_URL = 'https://giamon1.github.io/EcoTrack/';
+const QR_URL = 'https://giamon1.github.io/EcoTrack2/';
 const qrUrl = () => QR_URL + '#scan';
 
 function drawQR(canvas, text) {
