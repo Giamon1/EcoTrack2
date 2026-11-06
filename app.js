@@ -59,45 +59,143 @@ async function hash(s) {
     }
 }
 
-// ===== 3. Register and log in =====
-function mode(r) {
-    reg = r;
-    $('fR').hidden = !r;
-    $('tL').className = r ? '' : 'on';
-    $('tR').className = r ? 'on' : '';
-    $('go').textContent = r ? 'Create account' : 'Log in';
-    $('err').textContent = '';
-    $('pw').autocomplete = r ? 'new-password' : 'current-password';
+// ===== 3. Register, log in, forgot password (code sent by email) =====
+// EmailJS settings (free at emailjs.com). Leave empty to run in demo mode (code shown on screen).
+// Template variables used: {{to_email}}, {{to_name}}, {{code}}, {{minutes}}
+const EMAILJS = { publicKey: '', serviceId: '', templateId: '' };
+const CODE_MIN = 15;      // minutes a code stays valid
+const mailOn = !!(EMAILJS.publicKey && EMAILJS.serviceId && EMAILJS.templateId && window.emailjs);
+if (mailOn) emailjs.init({ publicKey: EMAILJS.publicKey });
+
+let state = 'login', pendingSid = null, resetFails = 0, resetLock = 0, lastSend = 0;
+const okEmail = s => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
+const findByEmail = em => Object.entries(users).find(([, u]) => (u.email || '').toLowerCase() === em);
+const setErr = (t, good) => { $('err').textContent = t; $('err').className = 'err' + (good ? ' ok' : ''); };
+
+function mode(m) {       // m: 'login' | 'reg' | 'forgot' | 'code'
+    state = m;
+    reg = m === 'reg';
+    const rec = m === 'forgot' || m === 'code';
+    $('fR').hidden = m !== 'reg';
+    $('fF').hidden = m !== 'forgot';
+    $('fC').hidden = m !== 'code';
+    $('fS').hidden = rec;
+    $('fP').hidden = rec;
+    $('tabs').hidden = rec;
+    $('forgot').hidden = m !== 'login';
+    $('back').hidden = !rec;
+    $('tL').className = m === 'login' ? 'on' : '';
+    $('tR').className = reg ? 'on' : '';
+    $('go').textContent = { login: 'Log in', reg: 'Create account', forgot: 'Send reset code', code: 'Change password' }[m];
+    $('pw').autocomplete = reg ? 'new-password' : 'current-password';
+    ['pw', 'np', 'np2', 'fcd'].forEach(id => $(id).value = '');
+    setErr('');
 }
 
-$('tL').onclick = () => mode(false);
-$('tR').onclick = () => mode(true);
+$('tL').onclick = () => mode('login');
+$('tR').onclick = () => mode('reg');
+$('forgot').onclick = () => mode('forgot');
+$('back').onclick = () => mode('login');
+
+// Step 1: student types their email. A code is created, saved as a request note and emailed.
+async function sendReset() {
+    const em = $('fem').value.trim().toLowerCase();
+    if (!okEmail(em)) return setErr('Enter a valid email address.');
+    if (Date.now() - lastSend < 60000) return setErr('Please wait a minute before asking for another code.');
+    lastSend = Date.now();
+    const hit = findByEmail(em);
+    pendingSid = hit ? hit[0] : null;
+    let msg = 'If that email is registered, a code has been sent. It is valid for ' + CODE_MIN + ' minutes.';
+    let good = true;
+    if (hit) {
+        const u = hit[1];
+        if (!Array.isArray(u.resets)) u.resets = [];
+        const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+        const req = { t: Date.now(), email: em, exp: Date.now() + CODE_MIN * 60000, h: await hash('rc:' + code), status: 'pending', tries: 0 };
+        u.resets.unshift(req);
+        u.resets.length = Math.min(u.resets.length, 20);
+        if (mailOn) {
+            try {
+                await emailjs.send(EMAILJS.serviceId, EMAILJS.templateId, { to_email: em, to_name: u.name, code, minutes: CODE_MIN });
+                req.status = 'sent';
+            } catch (err) {
+                req.status = 'failed';
+                msg = 'We could not send the email. Check your connection and try again.';
+                good = false;
+            }
+        } else {
+            req.status = 'demo';
+            msg = 'Demo: email is not set up yet, so your code is ' + code + '.';
+        }
+        saveU();
+        if (req.status === 'failed') return setErr(msg, false);
+    }
+    mode('code');
+    setErr(msg, good);
+}
+
+// Step 2: student types the code and a new password.
+async function confirmReset() {
+    const code = $('fcd').value.trim(), p1 = $('np').value, p2 = $('np2').value;
+    if (!/^\d{6}$/.test(code)) return setErr('Enter the 6-digit code.');
+    if (p1.length < 4) return setErr('Use a new password of at least 4 characters.');
+    if (p1 !== p2) return setErr('The two passwords do not match.');
+    if (Date.now() < resetLock) return setErr('Too many wrong tries. Wait ' + Math.ceil((resetLock - Date.now()) / 1000) + ' seconds.');
+    const u = pendingSid && users[pendingSid];
+    const req = u && (u.resets || [])[0];
+    const live = req && (req.status === 'sent' || req.status === 'demo');
+    if (live && Date.now() > req.exp) { req.status = 'expired'; saveU(); return setErr('This code has expired. Request a new one.'); }
+    if (!live || (await hash('rc:' + code)) !== req.h) {
+        if (++resetFails >= 5) { resetLock = Date.now() + 30000; resetFails = 0; }
+        if (live && ++req.tries >= 5) { req.status = 'locked'; saveU(); return setErr('Too many wrong codes. Request a new one.'); }
+        saveU();
+        return setErr('That code is not valid.');
+    }
+    u.h = await hash(p1);
+    req.status = 'used';
+    req.usedAt = Date.now();
+    saveU();
+    resetFails = 0;
+    const id = pendingSid;
+    mode('login');
+    $('sid').value = id;
+    setErr('Password changed. Log in with your new password.', true);
+}
+
+// Accounts made before email existed are asked once after logging in.
+function askEmail() {
+    const u = users[cur];
+    if (!u || u.email) return;
+    const em = (prompt('Add your email so you can reset your password later:') || '').trim().toLowerCase();
+    if (!okEmail(em) || findByEmail(em)) return;
+    u.email = em;
+    saveU();
+}
 
 $('go').onclick = async () => {
-    const sid = $('sid').value.trim(), pw = $('pw').value, e = $('err');
-    if (!sid || pw.length < 4) {
-        e.textContent = 'Enter your student ID and a password of at least 4 characters.';
-        return;
-    }
+    if (state === 'forgot') return sendReset();
+    if (state === 'code') return confirmReset();
+    const sid = $('sid').value.trim(), pw = $('pw').value;
+    if (!sid || pw.length < 4) return setErr('Enter your student ID and a password of at least 4 characters.');
     const h = await hash(pw);
     if (reg) {
-        const nm = $('nm').value.trim();
-        if (!nm) { e.textContent = 'Enter your full name.'; return; }
-        if (users[sid]) { e.textContent = 'That student ID is already registered. Log in instead.'; return; }
+        const nm = $('nm').value.trim(), em = $('em').value.trim().toLowerCase();
+        if (!nm) return setErr('Enter your full name.');
+        if (!okEmail(em)) return setErr('Enter a valid email address.');
+        if (users[sid]) return setErr('That student ID is already registered. Log in instead.');
+        if (findByEmail(em)) return setErr('That email is already used by another account.');
         users[sid] = {
             name: nm,
             section: $('gr').value.trim() || 'No section',
+            email: em,
             h, pts: 0, spent: 0, co2: 0,
             c: { rec: 0, bio: 0, res: 0, haz: 0 },
-            log: [], rd: []
+            log: [], rd: [], resets: []
         };
         saveU();
         enter(sid);
     } else {
-        if (!users[sid] || users[sid].h !== h) {
-            e.textContent = 'Student ID or password is incorrect.';
-            return;
-        }
+        if (!users[sid] || users[sid].h !== h) return setErr('Student ID or password is incorrect.');
         enter(sid);
     }
 };
@@ -139,6 +237,7 @@ function enter(sid) {
         drawScreen('Scan QR to login', 'Use the kiosk', 0);
     }, 0);
     render();
+    if (!u.email) setTimeout(askEmail, 500);
     // Opened by scanning the kiosk QR: go to the simulator and start the session
     if (location.hash === '#scan') {
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
@@ -390,7 +489,7 @@ kiosk.add(kp);
 add(new THREE.BoxGeometry(1, 1.3, .08), dk, 0, 0, 0, kp);
 
 // ---- Real QR code: opens the site, "#scan" starts the session after login ----
-const QR_URL = 'https://giamon1.github.io/EcoTrack/';
+const QR_URL = 'https://giamon1.github.io/EcoTrack2/';
 const qrUrl = () => QR_URL + '#scan';
 
 function drawQR(canvas, text) {
@@ -631,7 +730,7 @@ function vendTick(dt) {
 
     // windows
     const glass = M(0x6f9db8, .1, .3, 0x6f9db8), frameM = M(0xcfc8ad, 0, .7);
-    const fg = new THREE.BoxGeometry(2.2, 1.9, .08);
+    const fg2 = new THREE.BoxGeometry(2.2, 1.9, .08);
     const wg = new THREE.BoxGeometry(2, 1.7, .06);
     const mv = new THREE.BoxGeometry(.06, 1.7, .08);
     const mh = new THREE.BoxGeometry(2, .06, .08);
@@ -639,7 +738,7 @@ function vendTick(dt) {
     for (let k = 0; k < 9; k++) {
         if (k === 2) continue; // door goes here
         const wx = -14.4 + k * 3.6;
-        add(fg, frameM, wx, 3.1, -4.43, S);
+        add(fg2, frameM, wx, 3.1, -4.43, S);
         add(wg, glass, wx, 3.1, -4.39, S);
         add(mv, frameM, wx, 3.1, -4.36, S);
         add(mh, frameM, wx, 3.1, -4.36, S);
@@ -1057,13 +1156,13 @@ function drawBoxes(dets) {
     const g = o.getContext('2d');
     g.clearRect(0, 0, o.width, o.height);
     g.lineWidth = Math.max(3, o.width / 200);
-    g.font = '600 ' + Math.max(16, o.width / 32) + 'px Segoe UI,sans-serif';
+    g.font = '600 ' + Math.max(20, o.width / 32) + 'px Segoe UI,sans-serif';
     dets.forEach(d => {
         const [x, y, w, h] = d.bbox, it = ITEMS[COCO[d.class]], c = CATS[it.k];
         g.strokeStyle = c.c;
         g.fillStyle = c.c;
         g.strokeRect(x, y, w, h);
-        g.fillText(it.n, x + 4, Math.max(18, y - 6));
+        g.fillText(it.n, x + 4, Math.max(22, y - 6));
     });
 }
 

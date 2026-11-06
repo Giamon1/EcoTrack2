@@ -1,4 +1,4 @@
-/* EcoTrack styles: readability-focused rewrite */
+
 :root {
   --bg: #f7f3e3;
   --panel: #fffefa;
@@ -410,3 +410,16 @@ canvas#c { display: block; width: 100%; height: 500px; touch-action: none; curso
   * { transition: none !important; }
   .tile:hover, .rw:hover, .box.nr:hover, .lrow:hover, button:hover, .av:hover, .logo:hover { transform: none !important; }
 }
+
+/* Forgot password link buttons */
+.lnk {
+  border: 0;
+  background: none;
+  border-radius: 0;
+  padding: 6px 4px;
+  color: var(--g2);
+  text-decoration: underline;
+  font-size: 14.5px;
+}
+.lnk:hover { box-shadow: none !important; transform: none !important; }
+.err.ok { color: var(--g2); font-weight: 600; }
